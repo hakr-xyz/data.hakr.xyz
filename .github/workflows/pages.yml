@@ -1,0 +1,104 @@
+name: Deploy data site to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+      - name: Restore LFS data
+        run: git lfs pull
+      - name: Verify parts are real data (not LFS pointers)
+        run: |
+          for f in data.part*; do
+            s=$(wc -c < "$f")
+            echo "$f size=$s"
+            if [ "$s" -le 1000000 ]; then
+              echo "ERROR: $f looks like an LFS pointer file (too small)."
+              head -3 "$f"
+              exit 1
+            fi
+          done
+      - name: Build small Pages site with per-part download links
+        run: |
+          set -e
+          mkdir -p _site
+          repo="$GITHUB_REPOSITORY"
+          ref="$GITHUB_REF_NAME"
+          total=0; n=0
+          for f in data.part*; do
+            s=$(wc -c < "$f"); total=$((total + s)); n=$((n + 1))
+          done
+          total_h=$(( total / 1000000000 ))
+          {
+            echo '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            echo '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            echo '<title>data.hakr.xyz - downloads</title>'
+            echo '<style>body{font-family:system-ui,sans-serif;max-width:800px;margin:2rem auto;padding:0 1rem}'
+            echo 'li{padding:.3rem 0} a{text-decoration:none}</style>'
+            echo '</head><body>'
+            echo "<h1>data.hakr.xyz</h1>"
+            echo "<p>Original data file is split into <b>$n</b> parts. Total: <b>${total} bytes</b> (~${total_h} GB).</p>"
+            echo '<p>Click each part to download, then reassemble them in order:</p>'
+            echo '<ul>'
+            for f in data.part*; do
+              s=$(wc -c < "$f")
+              echo "<li><a href=\"https://github.com/$repo/raw/$ref/$f\" download>$f</a> &mdash; $s bytes</li>"
+            done
+            echo '</ul>'
+            echo '<h2>Reassemble</h2>'
+            echo '<p>Windows (cmd): <code>copy /b data.part* data.bin</code></p>'
+            echo '<p>Linux/macOS: <code>cat data.part* &gt; data.bin</code></p>'
+            echo "<p>Verify with the checksum file: <a href=\"https://github.com/$repo/raw/$ref/data.sha256\">data.sha256</a>."
+            echo 'Type: <code>sha256sum -c data.sha256</code> after renaming <code>data.bin</code> to the original name.</p>'
+            echo '</body></html>'
+          } > _site/index.html
+          {
+            echo '{'
+            echo '  "repo": "'$repo'",'
+            echo '  "ref": "'$ref'",'
+            echo '  "total_bytes": '$total','
+            echo '  "parts": ['
+            first=1
+            for f in data.part*; do
+              s=$(wc -c < "$f")
+              [ $first = 0 ] && printf ','
+              first=0
+              printf '    {"name":"%s","size_bytes":%s}\n' "$f" "$s"
+            done
+            echo '  ]'
+            echo '}'
+          } > _site/downloads.json
+          cp -f CNAME README.md _site/ 2>/dev/null || true
+          ls -l _site/
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
